@@ -1,0 +1,8 @@
+/build*/
+/analysis/
+__pycache__/
+/commit_with_llm.py
+/commit_with_llm.bat
+/captures/
+/dist/
+/video-reference/freestyle-reference.mkv
