@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Extract the FXLK archive used by FreeStyle (2000). Python 3.10+, no dependencies.
 
-The decoder was reconstructed from freestyle.exe; see docs/klx-format.md.
+The decoder was reconstructed from freestyle.exe and is also reused by the
+LTP3 reference extractor; see documentation/ltp3-container-format.md.
 Archive paths such as D:\\FreeStyle\\foo.jpg become D/FreeStyle/foo.jpg.
 """
 

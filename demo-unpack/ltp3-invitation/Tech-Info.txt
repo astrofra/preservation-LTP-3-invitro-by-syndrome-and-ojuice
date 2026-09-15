@@ -1,0 +1,69 @@
+	>>> Bugs
+
+-> Althought it should go right try avoiding alt+f4 while running this may
+   crash the sound player and your system also (; huhu... Wait end of demo
+   instead!
+
+-> Windowed colors are trashed? Try switching in 16bpp or 32bpp desktop
+   as i don't support 24bpp modes (sorry s3 owners) ): ...
+
+	>>> D3D Problems?
+
+ - I select my 3D card in the video board list and its still fucking SLOW!
+
+-> Did you set 'D3D rendering' option? Beware that software rendering is also
+   available on 3d cards...
+
+ - The sound is jerky...
+
+-> Grab the latest drivers for your sound card...
+   I did encounter this bug when running D3D on a S3Virge/Dx with Dsound
+   AWE64 Gold and that's for sure a drivers problem.
+
+ - The demo randomly freeze or exit without any error stuff... Why?!
+
+-> I DON'T KNOW!!! The only thing I know is that Asus V3400 AGP16mo do
+   that... I've tried to figure out WHY but didn't succeed ):... too
+   bad if your card does the same!
+
+ - When running Direct3D colors are wrong.
+or When running Direct3D my monitor goes sleep mode.
+or Reboot as soon as i launch it ):
+
+-> Make sure you installed your board's manufacturer drivers...
+   Sometimes drivers given with DXsetup are not reliable and may
+   report bad infos about device. Also try REFERENCE drivers from
+   your board's chipset manufacturer. (i.e: for an EON lilith Banshee
+   download the 3dfx banshee reference drivers)
+
+ - The render is shity!!! This suxx!
+
+-> Errr... try software mode first as you'll always get all rendering
+   types needed in 3d scenes. If it differs from what you get in D3D
+   then sorry but your board (or d3d drivers) doesn't support some
+   rendering types. (note that i might also have done some setup the
+    wrong way! (: ). However my 3dfx Voodoo1 runs everything perfectly
+   and this is something some people don't seem to understand. I just
+   can't stand seeing articles saying that 3dfx is crap because of its
+   16bpp output while the fucking brand new TNT can't manage mapping
+   additif alpha whereas an old 3dfx 1 did it!!! Go back looking your
+   amazing flat cube running 32bpp windowed... (:
+
+ - I can't uncheck the 'fullscreen' box when i select my ...blahblah...
+   board... why!?
+
+-> Your ...blahblah... board probably doesn't support windowed D3D.
+   (Voodoo chipset (not rush/banshee) for example)
+
+ - Awfuly slow...
+
+-> This might be because your board doesn't have enough memory to store
+   all scene's texture and D3D's texture management have to swap textures
+   all the time... Try the 'D3D Texture fit board's memory' option.
+
+ - Soundtrack sounds commercial
+
+-> Yeah, Traven did the bgm so that's pretty normal! pfffuu (; <BOUTADE>
+
+
+

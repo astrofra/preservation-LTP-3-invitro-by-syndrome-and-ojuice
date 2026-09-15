@@ -1,12 +1,16 @@
 /*
- * FreeStyle (2000) FXLK / KLX extractor. No third-party dependencies.
- * Reconstructed from the archive reader and LZARI decoder in freestyle.exe.
- * See documentation/klx-format.md for evidence, limits and format details.
+ * nX engine FXLK / LTP3 asset extractor. No third-party dependencies.
+ * The FXLK reader was reconstructed from FreeStyle (2000). The LTP3 mode
+ * reads the external metadata table embedded in LTP3.exe and decodes the
+ * concatenated LZARI streams in its companion file named "data".
+ * See documentation/ltp3-container-format.md for evidence and limitations.
  *
  * cmake -S . -B build -G "Visual Studio 17 2022" -A x64
  * cmake --build build --config Release
  * bin\klx_unpack.exe archive.klx new-output-directory
  * bin\klx_unpack.exe --list archive.klx
+ * bin\klx_unpack.exe --ltp3-exe LTP3.exe data new-output-directory
+ * bin\klx_unpack.exe --list --ltp3-exe LTP3.exe data
  */
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS
@@ -44,6 +48,14 @@
 #define Q2 0x10000u
 #define Q3 0x18000u
 #define Q4 0x20000u
+#define LTP3_TABLE_RVA 0x00027030u
+#define LTP3_ENTRY_COUNT 157u
+
+enum StorageMethod {
+    METHOD_XOR_9A,
+    METHOD_LZARI,
+    METHOD_RAW
+};
 
 typedef struct Decoder {
     const unsigned char *input;
@@ -62,8 +74,16 @@ typedef struct Entry {
     char *path;                 /* Same relative path, UTF-8. */
     uint32_t size, stored;
     size_t offset;
+    enum StorageMethod method;
     unsigned char *decoded;
 } Entry;
+
+typedef struct PeImage {
+    const unsigned char *data;
+    size_t size, section_table;
+    uint32_t image_base, size_of_headers;
+    uint16_t section_count;
+} PeImage;
 
 static void *allocate(size_t size)
 {
@@ -87,6 +107,11 @@ static uint32_t le32(const unsigned char *p)
 {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t le16(const unsigned char *p)
+{
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
 }
 
 #ifdef _WIN32
@@ -418,6 +443,29 @@ static void free_entries(Entry *entries, size_t count)
     free(entries);
 }
 
+static const char *method_name(enum StorageMethod method)
+{
+    if (method == METHOD_XOR_9A) return "xor-9a";
+    if (method == METHOD_LZARI) return "lzari";
+    return "raw";
+}
+
+static int prepare_entry_path(Entry *entries, size_t count)
+{
+    Entry *e = &entries[count - 1];
+    size_t j;
+    e->relative = normalize_name(e->name);
+    if (!e->relative) return 0;
+    e->path = utf8_from_1252(e->relative);
+    for (j = 0; j + 1 < count; ++j) {
+        size_t a = strlen(e->relative), b = strlen(entries[j].relative);
+        size_t n = a < b ? a : b;
+        if (equal_n(e->relative, entries[j].relative, n) &&
+            (a == b || e->relative[n] == '/' || entries[j].relative[n] == '/')) return 0;
+    }
+    return 1;
+}
+
 static int parse_archive(const unsigned char *data, size_t size, Entry **result, size_t *count)
 {
     uint32_t index_size, stored_index;
@@ -438,7 +486,7 @@ static int parse_archive(const unsigned char *data, size_t size, Entry **result,
     if (!decode_lzari(data + 12, stored_index, index, index_size)) goto done;
     while (cursor < index_size) {
         const unsigned char *end = (const unsigned char *)memchr(index + cursor, 0, index_size - cursor);
-        size_t length, j;
+        size_t length;
         Entry *e;
         if (!end || end == index + cursor || (size_t)(index + index_size - end) < 9) goto done;
         length = (size_t)(end - index - cursor);
@@ -455,18 +503,12 @@ static int parse_archive(const unsigned char *data, size_t size, Entry **result,
         e->name = (char *)allocate(length + 1);
         memcpy(e->name, index + cursor, length + 1);
         e->size = le32(end + 1); e->stored = le32(end + 5); e->offset = offset;
+        e->method = e->size == e->stored ? METHOD_XOR_9A : METHOD_LZARI;
         cursor += length + 9;
         if (e->size > SIZE_LIMIT - total || e->stored > size - offset ||
             (e->size && !e->stored)) goto done;
         total += e->size; offset += e->stored;
-        e->relative = normalize_name(e->name);
-        if (!e->relative) goto done;
-        e->path = utf8_from_1252(e->relative);
-        for (j = 0; j + 1 < *count; ++j) {
-            size_t a = strlen(e->relative), b = strlen(entries[j].relative), n = a < b ? a : b;
-            if (equal_n(e->relative, entries[j].relative, n) &&
-                (a == b || e->relative[n] == '/' || entries[j].relative[n] == '/')) goto done;
-        }
+        if (!prepare_entry_path(entries, *count)) goto done;
     }
     if (offset != size) goto done;
     ok = 1;
@@ -476,6 +518,128 @@ done:
         fprintf(stderr, "error: malformed index, unsafe/duplicate path, or inconsistent archive sizes\n");
         free_entries(entries, *count); *count = 0;
     } else *result = entries;
+    return ok;
+}
+
+static int init_pe(PeImage *pe, const unsigned char *data, size_t size)
+{
+    size_t nt, optional, section_table;
+    uint16_t optional_size;
+    if (size < 0x40 || data[0] != 'M' || data[1] != 'Z') return 0;
+    nt = le32(data + 0x3c);
+    if (nt > size - 24 || memcmp(data + nt, "PE\0\0", 4)) return 0;
+    optional_size = le16(data + nt + 20);
+    optional = nt + 24;
+    if (optional_size < 64 || optional > size - optional_size || le16(data + optional) != 0x10b) return 0;
+    section_table = optional + optional_size;
+    pe->section_count = le16(data + nt + 6);
+    if (!pe->section_count || pe->section_count > 96 ||
+        section_table > size || (size - section_table) / 40 < pe->section_count) return 0;
+    pe->data = data;
+    pe->size = size;
+    pe->section_table = section_table;
+    pe->image_base = le32(data + optional + 28);
+    pe->size_of_headers = le32(data + optional + 60);
+    return pe->image_base != 0;
+}
+
+static int pe_map_rva(const PeImage *pe, uint32_t rva,
+                      const unsigned char **result, size_t *available)
+{
+    unsigned int i;
+    if (rva < pe->size_of_headers && rva < pe->size) {
+        *result = pe->data + rva;
+        *available = pe->size - rva;
+        return 1;
+    }
+    for (i = 0; i < pe->section_count; ++i) {
+        const unsigned char *section = pe->data + pe->section_table + i * 40u;
+        uint32_t virtual_size = le32(section + 8);
+        uint32_t virtual_address = le32(section + 12);
+        uint32_t raw_size = le32(section + 16);
+        uint32_t raw_offset = le32(section + 20);
+        uint32_t span = virtual_size > raw_size ? virtual_size : raw_size;
+        uint32_t delta;
+        if (rva < virtual_address || rva - virtual_address >= span) continue;
+        delta = rva - virtual_address;
+        if (delta >= raw_size || raw_offset > pe->size || delta > pe->size - raw_offset) return 0;
+        *result = pe->data + raw_offset + delta;
+        *available = raw_size - delta;
+        if (*available > pe->size - raw_offset - delta) *available = pe->size - raw_offset - delta;
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_ltp3_archive(const unsigned char *data, size_t size,
+                              const unsigned char *exe, size_t exe_size,
+                              Entry **result, size_t *count)
+{
+    static const char path_prefix[] = "D:/Devellop/LTP3-Iinvit/";
+    PeImage pe;
+    Entry *entries = NULL;
+    size_t offset = 0, total = 0, i;
+    int ok = 0;
+    *count = 0;
+    *result = NULL;
+    if (!init_pe(&pe, exe, exe_size)) {
+        fprintf(stderr, "error: invalid 32-bit PE metadata executable\n");
+        return 0;
+    }
+    entries = (Entry *)calloc(LTP3_ENTRY_COUNT, sizeof(*entries));
+    if (!entries) {
+        fprintf(stderr, "error: out of memory\n");
+        return 0;
+    }
+    for (i = 0; i < LTP3_ENTRY_COUNT; ++i) {
+        const unsigned char *record, *name_data, *end;
+        size_t record_available, name_available, length;
+        uint32_t name_va, compressed, record_size, name_rva;
+        Entry *e = &entries[i];
+        *count = i + 1;
+        if (!pe_map_rva(&pe, LTP3_TABLE_RVA + (uint32_t)i * 12u,
+                        &record, &record_available) || record_available < 12) goto done;
+        name_va = le32(record);
+        compressed = le32(record + 4);
+        record_size = le32(record + 8);
+        if (name_va < pe.image_base || (compressed != 0 && compressed != 1) ||
+            !record_size || record_size > size - offset) goto done;
+        name_rva = name_va - pe.image_base;
+        if (!pe_map_rva(&pe, name_rva, &name_data, &name_available)) goto done;
+        end = (const unsigned char *)memchr(name_data, 0, name_available);
+        if (!end || end == name_data) goto done;
+        length = (size_t)(end - name_data);
+        if (length > 4096) goto done;
+        e->name = (char *)allocate(length + 1);
+        memcpy(e->name, name_data, length + 1);
+        if (strncmp(e->name, path_prefix, sizeof(path_prefix) - 1)) goto done;
+        if (compressed) {
+            if (record_size < 4) goto done;
+            e->size = le32(data + offset);
+            e->stored = record_size - 4;
+            e->offset = offset + 4;
+            e->method = METHOD_LZARI;
+        } else {
+            e->size = record_size;
+            e->stored = record_size;
+            e->offset = offset;
+            e->method = METHOD_RAW;
+        }
+        if (e->size > SIZE_LIMIT - total || (e->size && !e->stored)) goto done;
+        total += e->size;
+        offset += record_size;
+        if (!prepare_entry_path(entries, *count)) goto done;
+    }
+    if (offset != size) goto done;
+    ok = 1;
+done:
+    if (!ok) {
+        fprintf(stderr, "error: LTP3 metadata table or data file is inconsistent\n");
+        free_entries(entries, *count);
+        *count = 0;
+    } else {
+        *result = entries;
+    }
     return ok;
 }
 
@@ -490,8 +654,10 @@ static int extract_entries(const unsigned char *data, Entry *entries, size_t cou
         Entry *e = &entries[i];
         size_t j;
         e->decoded = (unsigned char *)allocate(e->size);
-        if (e->size == e->stored) {
+        if (e->method == METHOD_XOR_9A) {
             for (j = 0; j < e->size; ++j) e->decoded[j] = data[e->offset + j] ^ 0x9a;
+        } else if (e->method == METHOD_RAW) {
+            memcpy(e->decoded, data + e->offset, e->size);
         } else if (!decode_lzari(data + e->offset, e->stored, e->decoded, e->size)) {
             fprintf(stderr, "error: invalid LZARI payload: %s\n", e->path); return 0;
         }
@@ -525,34 +691,64 @@ static int extract_entries(const unsigned char *data, Entry *entries, size_t cou
 
 static int run(int argc, char **argv)
 {
-    const char *archive;
-    unsigned char *data;
+    const char *archive = NULL, *output = NULL, *metadata_path = NULL;
+    unsigned char *data, *metadata = NULL;
     Entry *entries = NULL;
-    size_t size = 0, count = 0, i;
-    int list, ok;
-    if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
-        printf("Usage: klx_unpack archive.klx new-output-directory\n"
-               "       klx_unpack --list archive.klx\n"
-               "FXLK / LZARI extractor. No external libraries. Input/output limit: 256 MiB.\n");
-        return 0;
+    size_t size = 0, metadata_size = 0, count = 0, i;
+    int arg = 1, positional = 0, list = 0, ok;
+    while (arg < argc) {
+        if (!strcmp(argv[arg], "--help") || !strcmp(argv[arg], "-h")) {
+            printf("Usage: klx_unpack [--list] archive.klx [new-output-directory]\n"
+                   "       klx_unpack [--list] --ltp3-exe LTP3.exe data [new-output-directory]\n"
+                   "nX FXLK / LTP3 LZARI extractor. No external libraries. Limit: 256 MiB.\n");
+            return 0;
+        } else if (!strcmp(argv[arg], "--list")) {
+            list = 1;
+            ++arg;
+        } else if (!strcmp(argv[arg], "--ltp3-exe") && arg + 1 < argc) {
+            metadata_path = argv[arg + 1];
+            arg += 2;
+        } else if (argv[arg][0] == '-') {
+            fprintf(stderr, "error: unknown or incomplete option: %s\n", argv[arg]);
+            return 1;
+        } else {
+            if (positional == 0) archive = argv[arg];
+            else if (positional == 1) output = argv[arg];
+            else {
+                fprintf(stderr, "error: too many positional arguments\n");
+                return 1;
+            }
+            ++positional;
+            ++arg;
+        }
     }
-    if (argc != 3) {
-        fprintf(stderr, "Usage: klx_unpack archive.klx new-output-directory\n"
-                        "       klx_unpack --list archive.klx\n"); return 1;
+    if (!archive || (list ? output != NULL : output == NULL)) {
+        fprintf(stderr, "Usage: klx_unpack [--list] archive.klx [new-output-directory]\n"
+                        "       klx_unpack [--list] --ltp3-exe LTP3.exe data [new-output-directory]\n");
+        return 1;
     }
-    list = !strcmp(argv[1], "--list"); archive = argv[list ? 2 : 1];
     data = read_file(archive, &size);
     if (!data) { fprintf(stderr, "error: could not read archive (limit 256 MiB): %s\n", archive); return 1; }
-    ok = parse_archive(data, size, &entries, &count);
+    if (metadata_path) {
+        metadata = read_file(metadata_path, &metadata_size);
+        if (!metadata) {
+            fprintf(stderr, "error: could not read LTP3 metadata executable: %s\n", metadata_path);
+            free(data);
+            return 1;
+        }
+        ok = parse_ltp3_archive(data, size, metadata, metadata_size, &entries, &count);
+    } else {
+        ok = parse_archive(data, size, &entries, &count);
+    }
     if (ok && list) {
         for (i = 0; i < count; ++i) {
             Entry *e = &entries[i];
             printf("%9zu %9u %9u %-7s %s\n", e->offset, (unsigned int)e->stored,
-                   (unsigned int)e->size, e->stored == e->size ? "xor-9a" : "lzari", e->path);
+                   (unsigned int)e->size, method_name(e->method), e->path);
         }
         printf("%zu files\n", count);
-    } else if (ok) ok = extract_entries(data, entries, count, argv[2]);
-    free_entries(entries, count); free(data);
+    } else if (ok) ok = extract_entries(data, entries, count, output);
+    free_entries(entries, count); free(metadata); free(data);
     return ok ? 0 : 1;
 }
 
